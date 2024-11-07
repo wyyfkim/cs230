@@ -1,21 +1,17 @@
-import gymnasium as gym
-import ale_py
+import numpy as np
+import gym
+from gym.spaces import Box
+from collections import deque
+from stable_baselines3.common import atari_wrappers
 
-gym.register_envs(ale_py)
-env = gym.make('ALE/DemonAttack-v5', render_mode="human")
-# env = gym.make('ALE/DemonAttackNoFrameskip-v4', render_mode="human")
+def create_atari_environment(
+    env_name: str,
+    frame_stack: int = 4,
+    noop_max: int = 30,
+) -> gym.Env:
+    name =f'{env_name}NoFrameskip-v4'
+    env = gym.make(name)
 
+    env = atari_wrappers.AtariWrapper(env, clip_reward=True, noop_max=noop_max, terminal_on_life_loss=False)
 
-EPISODES = 1000
-ACTION_NOTHING = 0
-ACTION_FIRE = 1
-ACTION_RIGHT = 2
-ACTION_LEFT = 3
-ACTION_RIGHT_AND_FIRE = 4
-ACTION_LEFT_AND_FIRE = 5
-
-state = env.reset()
-for e in range(EPISODES):
-     state = env.step(ACTION_FIRE)
-     env.render()
-     print(e, state[1])
+    return env
