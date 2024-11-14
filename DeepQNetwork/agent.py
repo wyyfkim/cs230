@@ -1,14 +1,13 @@
 import copy
 from typing import Callable
-import numpy as np
 import torch
 from torch import nn
-import base
 import abc
 from typing import NamedTuple, Text, Mapping, Iterable, Optional, Any
 import numpy as np
 from DeepQNetwork import replay_lib as replay_lib
 from DeepQNetwork import util
+import torch.nn.functional as F
 
 torch.autograd.set_detect_anomaly(True)
 Action = int
@@ -35,6 +34,31 @@ class QExtra(NamedTuple):
     target: Optional[torch.Tensor]
     td_error: Optional[torch.Tensor]
 
+class LossOutput(NamedTuple):
+    loss: torch.Tensor
+    extra: Optional[NamedTuple]
+
+def batched_index(values: torch.Tensor, indices: torch.Tensor, dim: int = -1, keepdims: bool = False) -> torch.Tensor:
+    """Equivalent to `values[:, indices]`.
+    Performs indexing on batches and sequence-batches by reducing over
+    zero-masked values.
+
+    Args:
+      values: tensor of shape `[B, num_values]` or `[T, B, num_values]`
+      indices: tensor of shape `[B]` or `[T, B]` containing indices.
+      dim: indexing dimension to perform the selection, defauot -1.
+      keepdims: If `True`, the returned tensor will have an added 1 dimension at
+        the end (e.g. `[B, 1]` or `[T, B, 1]`).
+
+    Returns:
+      Tensor of shape `[B]` or `[T, B]` containing values for the given indices.
+    """
+    one_hot_indices = F.one_hot(indices, values.shape[dim]).to(dtype=values.dtype)
+
+    # Incase values have rank 3, add a new dimension to one_hot_indices, for quantile_q_learning.
+    if len(values.shape) == 3 and len(one_hot_indices.shape) == 2:
+        one_hot_indices = one_hot_indices.unsqueeze(1)
+    return torch.sum(values * one_hot_indices, dim=dim, keepdims=keepdims)
 
 def qlearning(
     q_tm1: torch.Tensor,
@@ -42,12 +66,10 @@ def qlearning(
     r_t: torch.Tensor,
     discount_t: torch.Tensor,
     q_t: torch.Tensor,
-) -> base.LossOutput:
+) -> LossOutput:
     r"""Implements the Q-learning loss.
-
     The loss is `0.5` times the squared difference between `q_tm1[a_tm1]` and
     the target `r_t + discount_t * max q_t`.
-
     See "Reinforcement Learning: An Introduction" by Sutton and Barto.
     (http://incompleteideas.net/book/ebook/node65.html).
 
@@ -68,23 +90,11 @@ def qlearning(
           * `target`: batch of target values for `q_tm1[a_tm1]`, shape `[B]`.
           * `td_error`: batch of temporal difference errors, shape `[B]`.
     """
-    # Rank and compatibility checks.
-    base.assert_rank_and_dtype(q_tm1, 2, torch.float32)
-    base.assert_rank_and_dtype(a_tm1, 1, torch.long)
-    base.assert_rank_and_dtype(r_t, 1, torch.float32)
-    base.assert_rank_and_dtype(discount_t, 1, torch.float32)
-    base.assert_rank_and_dtype(q_t, 2, torch.float32)
-
-    base.assert_batch_dimension(a_tm1, q_tm1.shape[0])
-    base.assert_batch_dimension(r_t, q_tm1.shape[0])
-    base.assert_batch_dimension(discount_t, q_tm1.shape[0])
-    base.assert_batch_dimension(q_t, q_tm1.shape[0])
-
     # Q-learning op.
     # Build target and select head to update.
     with torch.no_grad():
         target_tm1 = r_t + discount_t * torch.max(q_t, dim=1)[0]
-    qa_tm1 = base.batched_index(q_tm1, a_tm1)
+    qa_tm1 = batched_index(q_tm1, a_tm1)
     # B = q_tm1.shape[0]
     # qa_tm1 = q_tm1[torch.arange(0, B), a_tm1]
 
@@ -93,7 +103,7 @@ def qlearning(
     td_error = target_tm1 - qa_tm1
     loss = 0.5 * td_error**2
 
-    return base.LossOutput(loss, QExtra(target_tm1, td_error))
+    return LossOutput(loss, QExtra(target_tm1, td_error))
 
 class Dqn(Agent):
     """DQN agent"""
@@ -114,51 +124,28 @@ class Dqn(Agent):
         discount: float,
         device: torch.device,
     ):
-        """
-        Args:
-            network: the Q network we want to optimize.
-            optimizer: the optimizer for Q network.
-            random_state: used to sample random actions for e-greedy policy.
-            replay: experience replay.
-            transition_accumulator: external helper class to build n-step transition.
-            exploration_epsilon: external schedule of e in e-greedy exploration rate.
-            learn_interval: the frequency (measured in agent steps) to do learning.
-            target_net_update_interval: the frequency (measured in number of online Q network parameter updates)
-                 to Update target network parameters.
-            min_replay_size: Minimum replay size before start to do learning.
-            batch_size: sample batch size.
-            action_dim: number of valid actions in the environment.
-            discount: gamma discount for future rewards.
-            device: PyTorch runtime device.
-        """
-
         self.agent_name = 'DQN'
-
         self._device = device
-        self._random_state = random_state
-        self._action_dim = action_dim
-
+        self._random_state = random_state #used to sample random actions for e-greedy policy.
+        self._action_dim = action_dim #number of valid actions in the environment.
         # Online Q network
-        self._online_network = network.to(device=self._device)
+        self._online_network = network.to(device=self._device) #the Q network we want to optimize.
         self._optimizer = optimizer
-
         # Target Q network
         self._target_network = copy.deepcopy(self._online_network).to(device=self._device)
         # Disable autograd for target network
         for p in self._target_network.parameters():
             p.requires_grad = False
-
         # Experience replay parameters
-        self._transition_accumulator = transition_accumulator
-        self._batch_size = batch_size
-        self._replay = replay
-
+        self._transition_accumulator = transition_accumulator #external helper class to build n-step transition.
+        self._batch_size = batch_size #sample batch size.
+        self._replay = replay # experience replay buffer
         # Learning related parameters
-        self._discount = discount
-        self._exploration_epsilon = exploration_epsilon
-        self._min_replay_size = min_replay_size
-        self._learn_interval = learn_interval
-        self._target_net_update_interval = target_net_update_interval
+        self._discount = discount #gamma discount for future rewards.
+        self._exploration_epsilon = exploration_epsilon #external schedule of e in e-greedy exploration rate.
+        self._min_replay_size = min_replay_size #Minimum replay size before start to do learning.
+        self._learn_interval = learn_interval #the frequency (measured in agent steps) to do learning.
+        self._target_net_update_interval = target_net_update_interval #the frequency (measured in number of online Q network parameter updates) to Update target network parameters.
 
         # Counters and stats
         self._step_t = -1
@@ -169,17 +156,13 @@ class Dqn(Agent):
     def step(self, timestep: util.TimeStep) -> Action:
         """Given current timestep, do a action selection and a series of learn related activities"""
         self._step_t += 1
-
-        a_t = self.act(timestep)
-
+        a_t = self._choose_action(timestep, self._exploration_epsilon(self._step_t))
         # Try build transition and add into replay
         for transition in self._transition_accumulator.step(timestep, a_t):
             self._replay.add(transition)
-
         # Return if replay is not ready
         if self._replay.size < self._min_replay_size:
             return a_t
-
         # Start to learn
         if self._step_t % self._learn_interval == 0:
             self._learn()
@@ -189,11 +172,6 @@ class Dqn(Agent):
     def reset(self):
         """This method should be called at the beginning of every episode."""
         self._transition_accumulator.reset()
-
-    def act(self, timestep: util.TimeStep) -> Action:
-        'Given timestep, return an action.'
-        a_t = self._choose_action(timestep, self.exploration_epsilon)
-        return a_t
 
     @torch.no_grad()
     def _choose_action(self, timestep: util.TimeStep, epsilon: float) -> Action:
@@ -210,21 +188,17 @@ class Dqn(Agent):
     def _learn(self) -> None:
         """Sample a batch of transitions and learn."""
         transitions = self._replay.sample(self._batch_size)
-        self._update(transitions)
-
-        # Update target network parameters
-        if self._update_t > 1 and self._update_t % self._target_net_update_interval == 0:
-            self._update_target_network()
-
-    def _update(self, transitions: replay_lib.Transition) -> None:
         self._optimizer.zero_grad()
         loss = self._calc_loss(transitions)
         loss.backward()
         self._optimizer.step()
         self._update_t += 1
 
-        # For logging only.
-        self._loss_t = loss.detach().cpu().item()
+        # Update target network parameters
+        if self._update_t > 1 and self._update_t % self._target_net_update_interval == 0:
+            #Copy online network parameters to target network
+            self._target_network.load_state_dict(self._online_network.state_dict())
+            self._target_update_t += 1
 
     def _calc_loss(self, transitions: replay_lib.Transition) -> torch.Tensor:
         """Calculate loss for a given batch of transitions."""
@@ -233,13 +207,6 @@ class Dqn(Agent):
         r_t = torch.from_numpy(transitions.r_t).to(device=self._device, dtype=torch.float32)  # [batch_size]
         s_t = torch.from_numpy(transitions.s_t).to(device=self._device, dtype=torch.float32)  # [batch_size, state_shape]
         done = torch.from_numpy(transitions.done).to(device=self._device, dtype=torch.bool)  # [batch_size]
-
-        # Rank and dtype checks, note states may be images, which is rank 4.
-        base.assert_rank_and_dtype(s_tm1, (2, 4), torch.float32)
-        base.assert_rank_and_dtype(s_t, (2, 4), torch.float32)
-        base.assert_rank_and_dtype(a_tm1, 1, torch.long)
-        base.assert_rank_and_dtype(r_t, 1, torch.float32)
-        base.assert_rank_and_dtype(done, 1, torch.bool)
 
         discount_t = (~done).float() * self._discount
 
@@ -256,16 +223,6 @@ class Dqn(Agent):
         loss = torch.mean(loss, dim=0)
         return loss
 
-    def _update_target_network(self):
-        """Copy online network parameters to target network."""
-        self._target_network.load_state_dict(self._online_network.state_dict())
-        self._target_update_t += 1
-
-    @property
-    def exploration_epsilon(self):
-        """Call external schedule function"""
-        return self._exploration_epsilon(self._step_t)
-
     @property
     def statistics(self):
         """Returns current agent statistics as a dictionary."""
@@ -275,5 +232,5 @@ class Dqn(Agent):
             # 'discount': self._discount,
             'updates': self._update_t,
             'target_updates': self._target_update_t,
-            'exploration_epsilon': self.exploration_epsilon,
+            'exploration_epsilon': self._exploration_epsilon(self._step_t),
         }
