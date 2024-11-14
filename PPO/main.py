@@ -3,7 +3,8 @@ import ale_py
 import torch
 from stable_baselines3 import PPO
 
-total_timesteps = 100000
+total_timesteps = 100000 # Total number of samples (env steps) to train on
+max_steps_per_episode = 1000  # Maximum number of steps per episode
 
 # Create the environment
 env = gym.make('ALE/DemonAttack-v5', render_mode='human')
@@ -21,7 +22,6 @@ model.save("ppo_demon_attack")
 # model = PPO.load("ppo_demon_attack")
 
 # Run a test episode
-max_steps_per_episode = 1000  # Maximum number of steps per episode
 obs, _ = env.reset()  # Unpack the observation from the tuple
 
 for _ in range(max_steps_per_episode):
