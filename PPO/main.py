@@ -7,8 +7,31 @@ total_timesteps = 100000 # Total number of samples (env steps) to train on
 max_steps_per_episode = 100000  # Maximum number of steps per episode
 test_episode_times = 10
 
+class CustomRewardWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super(CustomRewardWrapper, self).__init__(env)
+        self.lives = 0  # Track number of lives
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.lives = info.get('lives', 0)  # Initialize lives at reset
+        return obs, info
+
+    def step(self, action):
+        obs, reward, done, truncated, info = self.env.step(action)
+        
+        # Check if a life was lost
+        current_lives = info.get('lives', self.lives)
+        if current_lives < self.lives:
+            # Penalize for losing a life
+            reward -= 10  # Adjust this penalty as needed
+        
+        self.lives = current_lives  # Update life count
+        return obs, reward, done, truncated, info
+
 # Create the environment
 env = gym.make('ALE/DemonAttack-v5')
+env = CustomRewardWrapper(env)
 
 # Create the PPO model with a CnnPolicy
 model = PPO("CnnPolicy", env, verbose=1, device='cuda' if torch.cuda.is_available() else 'cpu')
@@ -23,6 +46,7 @@ model.save("ppo_demon_attack")
 # model = PPO.load("ppo_demon_attack")
 
 # Run a test episode
+env = gym.make('ALE/DemonAttack-v5')
 total_reward = 0
 for i in range(test_episode_times):
     episode_reward = 0  # Initialize the episode reward counter
