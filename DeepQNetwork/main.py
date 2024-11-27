@@ -1,6 +1,4 @@
-from typing import Iterable
 import math
-import gym
 from absl import app
 import numpy as np
 from typing import NamedTuple, Tuple
@@ -9,9 +7,8 @@ from torch import nn
 from absl import logging
 
 from DeepQNetwork import agent as agent_lib
-from DeepQNetwork import environment as gym_env
-from DeepQNetwork import replay_lib as replay_lib
-from DeepQNetwork import util
+from lib import replay_lib as replay_lib, util, environment as gym_env
+
 
 def calc_conv2d_output(h_w: Tuple, kernel_size: int = 1, stride: int = 1, pad: int = 0, dilation: int = 1) -> Tuple[int, int]:
     if not isinstance(kernel_size, Tuple):
@@ -108,13 +105,17 @@ def main(argv):
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
-
     runtime_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     exploration_epsilon_begin_value = 1.0 #Begin value of the exploration rate in e-greedy policy.
     exploration_epsilon_end_value = 0.01 #End (decayed) value of the exploration rate in e-greedy policy.
     exploration_epsilon_decay_step = int(1e6) # Total steps (after frame skip) to decay value of the exploration rate.
     eval_exploration_epsilon = 0.01 #Fixed exploration rate in e-greedy policy for evaluation.
     min_reply_size = 50000 #Minimum replay size before learning starts.
+    min_replay_size = 50000  # Minimum replay size before learning starts
+    num_iterations = 100
+    num_train_steps = int(5e5)  # Number of training steps (environment steps or frames) to run per iteration
+    importance_sampling_exponent_begin_value = 0.4  # Importance sampling exponent begin value
+    importance_sampling_exponent_end_value = 1.0  # Importance sampling exponent end value after decay
 
     random_state = np.random.RandomState(1)  # seed = 1
 
@@ -145,6 +146,30 @@ def main(argv):
     )
 
     print("create replay buffer")
+    # Create prioritized transition replay
+    # Note the t in the replay is not exactly aligned with the agent t.
+    importance_sampling_exponent_schedule = LinearSchedule(
+        begin_t=int(min_replay_size),
+        end_t=(num_iterations * int(num_train_steps)),
+        begin_value=importance_sampling_exponent_begin_value,
+        end_value=importance_sampling_exponent_end_value,
+    )
+    replay = replay_lib.PrioritizedReplay(
+        capacity=int(1e6),  # Maximum replay size.
+        structure=replay_lib.TransitionStructure,
+        priority_exponent=0.6,
+        importance_sampling_exponent=importance_sampling_exponent_schedule,
+        normalize_weights=True,
+        random_state=random_state,
+        encoder=lambda transition: transition._replace(
+            s_tm1=replay_lib.compress(transition.s_tm1),
+            s_t=replay_lib.compress(transition.s_t),
+        ),
+        decoder=lambda transition: transition._replace(
+            s_tm1=replay_lib.uncompress(transition.s_tm1),
+            s_t=replay_lib.uncompress(transition.s_t),
+        )
+    )
     replay = replay_lib.UniformReplay(
         capacity=int(1e6), #Maximum replay size.
         structure=replay_lib.TransitionStructure,

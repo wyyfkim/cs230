@@ -3,10 +3,9 @@ from typing import Callable
 import torch
 from torch import nn
 import abc
-from typing import NamedTuple, Text, Mapping, Iterable, Optional, Any
+from typing import NamedTuple, Text, Mapping, Optional
 import numpy as np
-from DeepQNetwork import replay_lib as replay_lib
-from DeepQNetwork import util
+from lib import replay_lib as replay_lib, util
 import torch.nn.functional as F
 
 torch.autograd.set_detect_anomaly(True)
