@@ -1,8 +1,10 @@
+import cv2
 import numpy as np
 import gym
 from gym.spaces import Box
 from collections import deque
 from stable_baselines3.common import atari_wrappers
+from gym.wrappers import AtariPreprocessing
 
 class LazyFrames(object):
     """This object ensures that common frames between the observations are only stored once.
@@ -83,19 +85,59 @@ class ObservationChannelFirst(gym.ObservationWrapper):
         # make sure it's C-contiguous for compress state
         return np.ascontiguousarray(obs, dtype=self.observation_space.dtype)
 
+class ResizeAndGrayscaleFrame(gym.ObservationWrapper):
+    """
+    Resize frames to 84x84, and grascale image as done in the Nature paper.
+    """
+
+    def __init__(self, env, width=84, height=84, grayscale=True):
+        super().__init__(env)
+
+        assert self.observation_space.dtype == np.uint8 and len(self.observation_space.shape) == 3
+
+        self.frame_width = width
+        self.frame_height = height
+        self.grayscale = grayscale
+        num_channels = 1 if self.grayscale else 3
+
+        self.observation_space = Box(
+            low=0,
+            high=255,
+            shape=(self.frame_height, self.frame_width, num_channels),
+            dtype=np.uint8,
+        )
+
+    def observation(self, obs):
+        # pylint: disable=no-member
+
+        if self.grayscale:
+            obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+        obs = cv2.resize(obs, (self.frame_width, self.frame_height), interpolation=cv2.INTER_AREA)
+        # pylint: disable=no-member
+
+        if self.grayscale:
+            obs = np.expand_dims(obs, -1)
+
+        return obs
+
 def create_atari_environment(
     env_name: str,
     frame_stack: int = 4,
     noop_max: int = 30,
 ) -> gym.Env:
-    name =f'{env_name}NoFrameskip-v4'
-    env = gym.make(name)
+    # name =f'{env_name}NoFrameskip-v4'
+    # env = gym.make(name)
+    env = gym.make('ALE/DemonAttack-v5')
+    env = ResizeAndGrayscaleFrame(env, width=84, height=84)
 
-    env = atari_wrappers.AtariWrapper(env, clip_reward=True, noop_max=noop_max, terminal_on_life_loss=False)
-
-    #stack n last frames.
+    print(env)
+    # env = atari_wrappers.AtariWrapper(env)
+    #
+    # # env = atari_wrappers.AtariWrapper(env, clip_reward=True, noop_max=noop_max, terminal_on_life_loss=False)
+    #
+    # #stack n last frames.
     env = FrameStack(env, frame_stack)
-    # change observation image from shape [H, W, C] to in the range [C, H, W]
+    # # change observation image from shape [H, W, C] to in the range [C, H, W]
     env = ObservationChannelFirst(env)
 
     return env

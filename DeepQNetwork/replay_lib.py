@@ -20,6 +20,12 @@ class Transition(NamedTuple):
 
 
 TransitionStructure = Transition(s_tm1=None, a_tm1=None, r_t=None, s_t=None, done=None)
+def compress(array: np.ndarray) -> CompressedArray:
+    return snappy.compress(array), array.shape, array.dtype
+def uncompress(compressed: CompressedArray) -> np.ndarray:
+    compressed_array, shape, dtype = compressed
+    byte_string = snappy.uncompress(compressed_array)
+    return np.frombuffer(byte_string, dtype=dtype).reshape(shape)
 
 
 class UniformReplay(Generic[ReplayStructure]):
@@ -121,3 +127,4 @@ def np_stack_list_of_transitions(transitions, structure, axis=0):
     transposed = zip(*transitions)
     stacked = [np.stack(xs, axis=axis) for xs in transposed]
     return type(structure)(*stacked)
+

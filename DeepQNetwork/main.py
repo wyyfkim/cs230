@@ -70,7 +70,7 @@ class DqnNet(nn.Module):
         self.body = ConvNet(state_dim)
 
         self.value_head = nn.Sequential(
-            nn.Linear(self.out_features, 512),
+            nn.Linear(self.body.out_features, 512),
             nn.ReLU(),
             nn.Linear(512, action_dim),
         )
@@ -144,14 +144,19 @@ def main(argv):
         end_value=exploration_epsilon_end_value
     )
 
-    #TODO: Create encoder and decoder
     print("create replay buffer")
     replay = replay_lib.UniformReplay(
         capacity=int(1e6), #Maximum replay size.
         structure=replay_lib.TransitionStructure,
         random_state=random_state,
-        encoder=None,
-        decoder=None,
+        encoder=lambda transition: transition._replace(
+            s_tm1=replay_lib.compress(transition.s_tm1),
+            s_t=replay_lib.compress(transition.s_t),
+        ),
+        decoder=lambda transition: transition._replace(
+        s_tm1=replay_lib.uncompress(transition.s_tm1),
+        s_t=replay_lib.uncompress(transition.s_t),
+        )
     )
 
     # Create DQN agent instance
@@ -176,7 +181,10 @@ def main(argv):
     print("start iteration and training")
     num_iterations = 100
     for iteration in range(1, num_iterations + 1):
+        print("Iteration: ", iteration)
+
         while True:  # For each episode.
+            print("For each episode.")
             train_agent.reset()
             # Think of reset as a special 'action' the agent takes, thus given us a reward 'zero', and a new state 's_t'.
             observation = train_env.reset()
@@ -186,6 +194,7 @@ def main(argv):
             info = {}
 
             while True:  # For each step in the current episode.
+                # print("For each step in the current episode. Reward is ", reward)
                 timestep_t = util.TimeStep(
                     observation=observation,
                     reward=reward,
@@ -217,11 +226,10 @@ def main(argv):
                         info=info,
                     )
                     unused_a = train_agent.step(timestep_t)  # noqa: F841
-                    # yield train_env, timestep_t, train_agent, None
+                    # Save checkpoint
+                    filename = "./checkpoints/DQN_" + str(iteration) + ".ckpt"
+                    torch.save(network.state_dict(), filename)
                     break
-
-    #TODO Create evaluation agent instance
-
 
 if __name__ == '__main__':
     app.run(main)
