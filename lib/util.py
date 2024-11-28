@@ -1,5 +1,7 @@
 from typing import NamedTuple, Text, Mapping, Iterable, Optional, Any
 import numpy as np
+import abc
+import torch
 
 class TimeStep(NamedTuple):
     """Environment timestep"""
@@ -11,3 +13,25 @@ class TimeStep(NamedTuple):
     info: Optional[
         Mapping[Text, Any]
     ]  # Info dictionary which contains non-clipped/unscaled reward and other information, only used by the trackers
+
+class Agent(abc.ABC):
+    """Agent interface."""
+    agent_name: str  # agent name
+    step_t: int  # runtime steps
+    @abc.abstractmethod
+    def step(self, timestep: util.TimeStep) -> Action:
+        """Selects action given timestep and potentially learns."""
+    @abc.abstractmethod
+    def reset(self) -> None:
+        """Resets the agent's episodic state such as frame stack and action repeat.
+
+        This method should be called at the beginning of every episode.
+        """
+    @property
+    @abc.abstractmethod
+    def statistics(self) -> Mapping[Text, float]:
+        """Returns current agent statistics as a dictionary."""
+
+class LossOutput(NamedTuple):
+    loss: torch.Tensor
+    extra: Optional[NamedTuple]

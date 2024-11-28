@@ -177,23 +177,24 @@ def main(argv):
             s_t=replay_lib.uncompress(transition.s_t),
         )
     )
-    replay = replay_lib.UniformReplay(
-        capacity=int(1e6),  # Maximum replay size.
-        structure=replay_lib.TransitionStructure,
-        random_state=random_state,
-        encoder=lambda transition: transition._replace(
-            s_tm1=replay_lib.compress(transition.s_tm1),
-            s_t=replay_lib.compress(transition.s_t),
-        ),
-        decoder=lambda transition: transition._replace(
-            s_tm1=replay_lib.uncompress(transition.s_tm1),
-            s_t=replay_lib.uncompress(transition.s_t),
-        )
-    )
+    # replay = replay_lib.UniformReplay(
+    #     capacity=int(1e6),  # Maximum replay size.
+    #     structure=replay_lib.TransitionStructure,
+    #     random_state=random_state,
+    #     encoder=lambda transition: transition._replace(
+    #         s_tm1=replay_lib.compress(transition.s_tm1),
+    #         s_t=replay_lib.compress(transition.s_t),
+    #     ),
+    #     decoder=lambda transition: transition._replace(
+    #         s_tm1=replay_lib.uncompress(transition.s_tm1),
+    #         s_t=replay_lib.uncompress(transition.s_t),
+    #     )
+    # )
 
-    # Create DQN agent instance
+    # Create Double DQN agent instance
     print("create train agent")
-    train_agent = agent_lib.Dqn(
+
+    train_agent = agent_lib.DoubleDqn(
         network=network,
         optimizer=optimizer,
         transition_accumulator=replay_lib.TransitionAccumulator(),

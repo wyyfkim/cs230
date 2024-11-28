@@ -1,5 +1,5 @@
 import copy
-from typing import Callable
+from typing import Callable, Tuple
 import torch
 from torch import nn
 import abc
@@ -11,78 +11,47 @@ import torch.nn.functional as F
 torch.autograd.set_detect_anomaly(True)
 Action = int
 
-class QExtra(NamedTuple):
-    target: Optional[torch.Tensor]
-    td_error: Optional[torch.Tensor]
+class DoubleQExtra(NamedTuple):
+    target: torch.Tensor
+    td_error: torch.Tensor
+    best_action: torch.Tensor
 
 def batched_index(values: torch.Tensor, indices: torch.Tensor, dim: int = -1, keepdims: bool = False) -> torch.Tensor:
-    """Equivalent to `values[:, indices]`.
-    Performs indexing on batches and sequence-batches by reducing over
-    zero-masked values.
-
-    Args:
-      values: tensor of shape `[B, num_values]` or `[T, B, num_values]`
-      indices: tensor of shape `[B]` or `[T, B]` containing indices.
-      dim: indexing dimension to perform the selection, defauot -1.
-      keepdims: If `True`, the returned tensor will have an added 1 dimension at
-        the end (e.g. `[B, 1]` or `[T, B, 1]`).
-
-    Returns:
-      Tensor of shape `[B]` or `[T, B]` containing values for the given indices.
-    """
     one_hot_indices = F.one_hot(indices, values.shape[dim]).to(dtype=values.dtype)
-
-    # Incase values have rank 3, add a new dimension to one_hot_indices, for quantile_q_learning.
     if len(values.shape) == 3 and len(one_hot_indices.shape) == 2:
         one_hot_indices = one_hot_indices.unsqueeze(1)
     return torch.sum(values * one_hot_indices, dim=dim, keepdims=keepdims)
 
-def qlearning(
+def double_qlearning(
     q_tm1: torch.Tensor,
     a_tm1: torch.Tensor,
     r_t: torch.Tensor,
     discount_t: torch.Tensor,
-    q_t: torch.Tensor,
+    q_t_value: torch.Tensor,
+    q_t_selector: torch.Tensor,
 ) -> util.LossOutput:
-    r"""Implements the Q-learning loss.
-    The loss is `0.5` times the squared difference between `q_tm1[a_tm1]` and
-    the target `r_t + discount_t * max q_t`.
-    See "Reinforcement Learning: An Introduction" by Sutton and Barto.
-    (http://incompleteideas.net/book/ebook/node65.html).
-
-    Args:
-      q_tm1: Tensor holding Q-values for first timestep in a batch of
-        transitions, shape `[B x action_dim]`.
-      a_tm1: Tensor holding action indices, shape `[B]`.
-      r_t: Tensor holding rewards, shape `[B]`.
-      discount_t: Tensor holding discount values, shape `[B]`.
-      q_t: Tensor holding Q-values for second timestep in a batch of
-        transitions, shape `[B x action_dim]`.
-
-    Returns:
-      A namedtuple with fields:
-
-      * `loss`: a tensor containing the batch of losses, shape `[B]`.
-      * `extra`: a namedtuple with fields:
-          * `target`: batch of target values for `q_tm1[a_tm1]`, shape `[B]`.
-          * `td_error`: batch of temporal difference errors, shape `[B]`.
-    """
-    # Q-learning op.
+    # double Q-learning op.
     # Build target and select head to update.
-    with torch.no_grad():
-        target_tm1 = r_t + discount_t * torch.max(q_t, dim=1)[0]
-    qa_tm1 = batched_index(q_tm1, a_tm1)
+
+    best_action = torch.argmax(q_t_selector, dim=1)
     # B = q_tm1.shape[0]
+    # double_q_bootstrapped = q_t_value[torch.arange(0, B), best_action]
+    double_q_bootstrapped = batched_index(q_t_value, best_action)
+
+    with torch.no_grad():
+        target_tm1 = r_t + discount_t * double_q_bootstrapped
+
     # qa_tm1 = q_tm1[torch.arange(0, B), a_tm1]
+    qa_tm1 = batched_index(q_tm1, a_tm1)
 
     # Temporal difference error and loss.
     # Loss is MSE scaled by 0.5, so the gradient is equal to the TD error.
     td_error = target_tm1 - qa_tm1
     loss = 0.5 * td_error**2
 
-    return util.LossOutput(loss, QExtra(target_tm1, td_error))
+    return util.LossOutput(loss, DoubleQExtra(target_tm1, td_error, best_action))
 
-class Dqn(util.Agent):
+class DoubleDqn(util.Agent):
     """DQN agent"""
 
     def __init__(
@@ -90,7 +59,7 @@ class Dqn(util.Agent):
         network: nn.Module,
         optimizer: torch.optim.Optimizer,
         random_state: np.random.RandomState,  # pylint: disable=no-member
-        replay: replay_lib.UniformReplay,
+        replay: replay_lib.PrioritizedReplay,
         transition_accumulator: replay_lib.TransitionAccumulator,
         exploration_epsilon: Callable[[int], float],
         learn_interval: int,
@@ -101,7 +70,7 @@ class Dqn(util.Agent):
         discount: float,
         device: torch.device,
     ):
-        self.agent_name = 'DQN'
+        self.agent_name = 'DoubleDQN'
         self._device = device
         self._random_state = random_state #used to sample random actions for e-greedy policy.
         self._action_dim = action_dim #number of valid actions in the environment.
@@ -117,13 +86,15 @@ class Dqn(util.Agent):
         self._transition_accumulator = transition_accumulator #external helper class to build n-step transition.
         self._batch_size = batch_size #sample batch size.
         self._replay = replay # experience replay buffer
+        self._max_seen_priority = 1.0
         # Learning related parameters
         self._discount = discount #gamma discount for future rewards.
         self._exploration_epsilon = exploration_epsilon #external schedule of e in e-greedy exploration rate.
         self._min_replay_size = min_replay_size #Minimum replay size before start to do learning.
         self._learn_interval = learn_interval #the frequency (measured in agent steps) to do learning.
         self._target_net_update_interval = target_net_update_interval #the frequency (measured in number of online Q network parameter updates) to Update target network parameters.
-
+        self._clip_grad = True
+        self._max_grad_norm = 10.0 #Max gradients norm when do gradients clip.
         # Counters and stats
         self._step_t = -1
         self._update_t = 0
@@ -131,12 +102,11 @@ class Dqn(util.Agent):
         self._loss_t = np.nan
 
     def step(self, timestep: util.TimeStep) -> Action:
-        """Given current timestep, do a action selection and a series of learn related activities"""
         self._step_t += 1
         a_t = self._choose_action(timestep, self._exploration_epsilon(self._step_t))
         # Try build transition and add into replay
         for transition in self._transition_accumulator.step(timestep, a_t):
-            self._replay.add(transition)
+            self._replay.add(transition, priority=self._max_seen_priority)
         # Return if replay is not ready
         if self._replay.size < self._min_replay_size:
             return a_t
@@ -163,21 +133,37 @@ class Dqn(util.Agent):
         return a_t.cpu().item()
 
     def _learn(self) -> None:
-        """Sample a batch of transitions and learn."""
-        transitions = self._replay.sample(self._batch_size)
+        transitions, indices, weights = self._replay.sample(self._batch_size)
+        # priorities = self._update(transitions, weights)
+        weights = torch.from_numpy(weights).to(device=self._device, dtype=torch.float32)  # [batch_size]
         self._optimizer.zero_grad()
-        loss = self._calc_loss(transitions)
+        loss, priorities = self._calc_loss(transitions)
+        # Multiply loss by sampling weights, averaging over batch dimension
+        loss = torch.mean(loss * weights.detach())
         loss.backward()
+
+        if self._clip_grad:
+            torch.nn.utils.clip_grad_norm_(self._online_network.parameters(), self._max_grad_norm,
+                                           error_if_nonfinite=True)
         self._optimizer.step()
         self._update_t += 1
 
+        # For logging only.
+        self._loss_t = loss.detach().cpu().item()
+
+
         # Update target network parameters
         if self._update_t > 1 and self._update_t % self._target_net_update_interval == 0:
-            #Copy online network parameters to target network
             self._target_network.load_state_dict(self._online_network.state_dict())
             self._target_update_t += 1
 
-    def _calc_loss(self, transitions: replay_lib.Transition) -> torch.Tensor:
+        if priorities.shape != (self._batch_size,):
+            raise RuntimeError(f'Expect priorities has shape {self._batch_size}, got {priorities.shape}')
+        priorities = np.abs(priorities)
+        self._max_seen_priority = np.max([self._max_seen_priority, np.max(priorities)])
+        self._replay.update_priorities(indices, priorities)
+
+    def _calc_loss(self, transitions: replay_lib.Transition) -> Tuple[torch.Tensor, np.ndarray]:
         """Calculate loss for a given batch of transitions."""
         s_tm1 = torch.from_numpy(transitions.s_tm1).to(device=self._device, dtype=torch.float32)  # [batch_size, state_shape]
         a_tm1 = torch.from_numpy(transitions.a_tm1).to(device=self._device, dtype=torch.int64)  # [batch_size]
@@ -190,15 +176,18 @@ class Dqn(util.Agent):
         # Compute predicted q values for s_tm1, using online Q network
         q_tm1 = self._online_network(s_tm1).q_values  # [batch_size, action_dim]
 
-        # Compute predicted q values for s_t, using target Q network
+        # Compute predicted q values for s_t, using target Q network and double Q
         with torch.no_grad():
+            q_t_selector = self._online_network(s_t).q_values  # [batch_size, action_dim]
             target_q_t = self._target_network(s_t).q_values  # [batch_size, action_dim]
 
         # Compute loss which is 0.5 * square(td_errors)
-        loss = qlearning(q_tm1, a_tm1, r_t, discount_t, target_q_t).loss
+        loss_output = double_qlearning(q_tm1, a_tm1, r_t, discount_t, target_q_t, q_t_selector)
         # Averaging over batch dimension
-        loss = torch.mean(loss, dim=0)
-        return loss
+        loss = torch.mean(loss_output.loss, dim=0)
+        priorities = torch.detach(loss_output.extra.td_error).cpu().numpy()  # [batch_size]
+
+        return loss,priorities
 
     @property
     def statistics(self):
