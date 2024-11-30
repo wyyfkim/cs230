@@ -4,9 +4,11 @@ import numpy as np
 from typing import NamedTuple, Tuple
 import torch
 from torch import nn
+from torch.nn import functional
 from absl import logging
+from itertools import chain
 
-from C51DeepQNetWork import agent
+from RainbowDeepQNetwork import agent
 from lib import replay_lib as replay_lib, util, environment as gym_env
 
 
@@ -47,12 +49,55 @@ class ConvNet(nn.Module):
         """Given raw state images, returns feature representation vector"""
         return self.net(x)
 
+class NoisyLinear(nn.Module):
+    def __init__(self, in_features, out_features, std_init=0.5):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer('bias_epsilon', torch.empty(out_features))
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self):
+        """Only call this during initialization"""
+        mu_range = 1 / math.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.std_init / math.sqrt(self.in_features))
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
+
+    def _scale_noise(self, size):
+        x = torch.randn(size, device=self.weight_mu.device)
+        return x.sign().mul_(x.abs().sqrt_())
+
+    def reset_noise(self):
+        """Should call this after doing backpropagation"""
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def forward(self, x):
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma.mul(self.weight_epsilon)
+            bias = self.bias_mu + self.bias_sigma.mul(self.bias_epsilon)
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+
+        return functional.linear(x, weight, bias)
 
 class C51NetworkOutputs(NamedTuple):
     q_values: torch.Tensor
     q_logits: torch.Tensor  # use logits and log_softmax() when calculate loss to avoid log() on zero cause NaN
 
-class C51DqnNet(nn.Module):
+class RainbowDqnNet(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, atoms: torch.Tensor):
         """
         Args:
@@ -74,6 +119,13 @@ class C51DqnNet(nn.Module):
         # network backbone
         self.body = ConvNet(state_dim)
 
+
+        self.advantage_head = nn.Sequential(
+            NoisyLinear(self.body.out_features, 512),
+            nn.ReLU(),
+            NoisyLinear(512, action_dim * self.num_atoms),
+        )
+
         self.value_head = nn.Sequential(
             nn.Linear(self.body.out_features, 512),
             nn.ReLU(),
@@ -81,7 +133,7 @@ class C51DqnNet(nn.Module):
         )
 
         # Initialize weights.
-        for module in net.modules():
+        for module in self.modules():
             if isinstance(module, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
                 if module.bias is not None:
@@ -90,9 +142,28 @@ class C51DqnNet(nn.Module):
     def forward(self, x: torch.Tensor) -> C51NetworkOutputs:
         x = x.float() / 255.0
         x = self.body(x)
-        q_values = self.value_head(x)  # [batch_size, action_dim]
-        return C51NetworkOutputs(q_values=q_values)
+        advantages = self.advantage_head(x)
+        values = self.value_head(x)
 
+        advantages = advantages.view(-1, self.action_dim, self.num_atoms)
+        values = values.view(-1, 1, self.num_atoms)
+
+        q_logits = values + (advantages - torch.mean(advantages, dim=1, keepdim=True))
+
+        q_logits = q_logits.view(-1, self.action_dim, self.num_atoms)  # [batch_size, action_dim, num_atoms]
+
+        q_dist = F.softmax(q_logits, dim=-1)
+        atoms = self.atoms[None, None, :].to(device=x.device)
+        q_values = torch.sum(q_dist * atoms, dim=-1)
+
+        return C51NetworkOutputs(q_logits=q_logits, q_values=q_values)
+
+    def reset_noise(self) -> None:
+        """Reset noisy layer"""
+        # combine two lists into one: list(chain(*zip(a, b)))
+        for module in list(chain(*zip(self.advantage_head.modules(), self.value_head.modules()))):
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()
 
 class LinearSchedule:
     def __init__(self, begin_value, end_value, begin_t, end_t=None, decay_steps=None):
@@ -131,6 +202,7 @@ def main(argv):
     num_atoms= 51 #Number of elements in the support of the categorical DQN
     v_min= -10.0 #Minimum elements value in the support of the categorical DQN
     v_max=10.0#Maximum elements value in the support of the categorical DQN
+    n_step=5#TD n-step bootstrap
 
     random_state = np.random.RandomState(1)  # seed = 1
 
@@ -149,17 +221,8 @@ def main(argv):
     # Test environment and state shape.
     obs = train_env.reset()
     print("Create C51-DQN Network")
-    network = C51DqnNet(state_dim=state_dim, action_dim=action_dim)
+    network = RainbowDqnNet(state_dim=state_dim, action_dim=action_dim, atoms=atoms)
     optimizer = torch.optim.Adam(network.parameters(), lr=0.00025)
-
-    # Create e-greedy exploration epsilon schedule
-    print("Create  e-greedy exploration epsilon schedule")
-    exploration_epsilon_schedule = LinearSchedule(
-        begin_t=int(min_reply_size),
-        decay_steps=int(exploration_epsilon_decay_step),
-        begin_value=exploration_epsilon_begin_value,
-        end_value=exploration_epsilon_end_value
-    )
 
     print("create replay buffer")
     # Create prioritized transition replay
@@ -189,21 +252,20 @@ def main(argv):
 
     # Create C51-DQN agent instance
     print("create train agent")
-    train_agent = agent.C51Dqn(
+    train_agent = agent.RainbowDqn(
         network=network,
         optimizer=optimizer,
         atoms=atoms,
-        transition_accumulator=replay_lib.TransitionAccumulator(),
+        # transition_accumulator=replay_lib.TransitionAccumulator(),
+        transition_accumulator=replay_lib.NStepTransitionAccumulator(n=n_step, discount=0.99),
         replay=replay,
-        exploration_epsilon=exploration_epsilon_schedule,
         batch_size=32,  # Sample batch size when updating the neural network.
         min_replay_size=min_reply_size,
         learn_interval=4,  # The frequency (measured in agent steps) to update parameters.
         target_net_update_interval=2500,
         # The frequency (measured in number of Q network parameter updates) to update target networks.
+        n_step=n_step,
         discount=0.99,  # Discount rate.
-        action_dim=action_dim,
-        random_state=random_state,
         device=runtime_device,
     )
 

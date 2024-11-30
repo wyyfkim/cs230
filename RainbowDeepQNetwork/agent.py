@@ -94,8 +94,8 @@ def categorical_dist_double_qlearning(
 
     return util.LossOutput(loss, Extra(target_tm1))
 
-class C51Dqn(util.Agent):
-    """DQN agent"""
+class RainbowDqn(util.Agent):
+    """RainbowDQN agent"""
 
     def __init__(
         self,
@@ -110,14 +110,12 @@ class C51Dqn(util.Agent):
         target_net_update_interval: int,
         min_replay_size: int,
         batch_size: int,
-        action_dim: int,
+        n_step: int,
         discount: float,
         device: torch.device,
     ):
-        self.agent_name = 'DQN'
+        self.agent_name = 'RainbowDQN'
         self._device = device
-        self._random_state = random_state #used to sample random actions for e-greedy policy.
-        self._action_dim = action_dim #number of valid actions in the environment.
         # Online Q network
         self._online_network = network.to(device=self._device) #the Q network we want to optimize.
         self._optimizer = optimizer
@@ -130,12 +128,14 @@ class C51Dqn(util.Agent):
         self._transition_accumulator = transition_accumulator #external helper class to build n-step transition.
         self._batch_size = batch_size #sample batch size.
         self._replay = replay # experience replay buffer
+        self._max_seen_priority = 1.0
+
         # Learning related parameters
         self._discount = discount #gamma discount for future rewards.
-        self._exploration_epsilon = exploration_epsilon #external schedule of e in e-greedy exploration rate.
-        self._min_replay_size = min_replay_size #Minimum replay size before start to do learning.
-        self._learn_interval = learn_interval #the frequency (measured in agent steps) to do learning.
-        self._target_net_update_interval = target_net_update_interval #the frequency (measured in number of online Q network parameter updates) to Update target network parameters.
+        self._n_step = n_step
+        self._min_replay_size = min_replay_size
+        self._learn_interval = learn_interval
+        self._target_net_update_interval = target_net_update_interval
         self._clip_grad = True
         self._max_grad_norm = 10.0 #Max gradients norm when do gradients clip.
         # Categorical DQN parameters
@@ -153,18 +153,15 @@ class C51Dqn(util.Agent):
     def step(self, timestep: util.TimeStep) -> Action:
         """Given current timestep, do a action selection and a series of learn related activities"""
         self._step_t += 1
-        a_t = self._choose_action(timestep, self._exploration_epsilon(self._step_t))
+        a_t = self._choose_action(timestep)
+        # a_t = self._choose_action(timestep, self._exploration_epsilon(self._step_t))
         # Try build transition and add into replay
         for transition in self._transition_accumulator.step(timestep, a_t):
             self._replay.add(transition, priority=self._max_seen_priority)
-
-        # Return if replay is not ready
         if self._replay.size < self._min_replay_size:
             return a_t
-        # Start to learn
         if self._step_t % self._learn_interval == 0:
             self._learn()
-
         return a_t
 
     def reset(self):
@@ -172,12 +169,7 @@ class C51Dqn(util.Agent):
         self._transition_accumulator.reset()
 
     @torch.no_grad()
-    def _choose_action(self, timestep: util.TimeStep, epsilon: float) -> Action:
-        if self._random_state.rand() <= epsilon:
-            # randint() return random integers from low (inclusive) to high (exclusive).
-            a_t = self._random_state.randint(0, self._action_dim)
-            return a_t
-
+    def _choose_action(self, timestep: util.TimeStep) -> Action:
         s_t = torch.from_numpy(timestep.observation[None, ...]).to(device=self._device, dtype=torch.float32)
         q_values = self._online_network(s_t).q_values
         a_t = torch.argmax(q_values, dim=-1)
@@ -208,9 +200,12 @@ class C51Dqn(util.Agent):
 
         if priorities.shape != (self._batch_size,):
             raise RuntimeError(f'Expect priorities has shape {self._batch_size}, got {priorities.shape}')
-        priorities = np.abs(priorities)
+        priorities = np.clip(np.abs(priorities), 0.0, 100.0)  # np.abs(priorities)
         self._max_seen_priority = np.max([self._max_seen_priority, np.max(priorities)])
         self._replay.update_priorities(indices, priorities)
+        #reset noise
+        self._online_network.reset_noise()
+        self._target_network.reset_noise()
 
     def _calc_loss(self, transitions: replay_lib.Transition) -> Tuple[torch.Tensor, np.ndarray]:
         """Calculate loss for a given batch of transitions."""

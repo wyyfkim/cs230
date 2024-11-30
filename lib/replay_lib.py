@@ -1,6 +1,7 @@
 from typing import Any, NamedTuple, Callable, Generic, Iterable, List, Optional, Sequence, Tuple, TypeVar
 import numpy as np
 import snappy
+import collections
 from lib import util
 
 CompressedArray = Tuple[bytes, Tuple, np.dtype]
@@ -26,6 +27,20 @@ def uncompress(compressed: CompressedArray) -> np.ndarray:
     compressed_array, shape, dtype = compressed
     byte_string = snappy.uncompress(compressed_array)
     return np.frombuffer(byte_string, dtype=dtype).reshape(shape)
+def _build_n_step_transition(transitions: Iterable[Transition], discount: float) -> Transition:
+    r_t = 0.0
+    discount_t = 1.0
+    for transition in transitions:
+        r_t += discount_t * transition.r_t
+        discount_t *= discount
+
+    return Transition(
+        s_tm1=transitions[0].s_tm1,
+        a_tm1=transitions[0].a_tm1,
+        r_t=r_t,
+        s_t=transitions[-1].s_t,
+        done=transitions[-1].done,
+    )
 
 class PrioritizedReplay:
     def __init__(
@@ -174,6 +189,61 @@ class UniformReplay(Generic[ReplayStructure]):
     def reset(self) -> None:
         """Reset the state of replay, should be called at the beginning of every episode"""
         self._num_added = 0
+
+class NStepTransitionAccumulator:
+    def __init__(self, n, discount):
+        self._discount = discount
+        self._transitions = collections.deque(maxlen=n)  # Store 1-step transitions.
+        self._timestep_tm1 = None
+        self._a_tm1 = None
+
+    def step(self, timestep_t: util.TimeStep, a_t: int) -> Iterable[Transition]:
+        """Accumulates timestep and resulting action, yields transitions."""
+        if timestep_t.first:
+            self.reset()
+
+        # There are no transitions on the first timestep.
+        if self._timestep_tm1 is None:
+            assert self._a_tm1 is None
+            if not timestep_t.first:
+                raise ValueError(f'Expected first timestep, got {str(timestep_t)}')
+            self._timestep_tm1 = timestep_t
+            self._a_tm1 = a_t
+            return  # Empty iterable.
+
+        self._transitions.append(
+            Transition(
+                s_tm1=self._timestep_tm1.observation,
+                a_tm1=self._a_tm1,
+                r_t=timestep_t.reward,
+                s_t=timestep_t.observation,
+                done=timestep_t.done,
+            )
+        )
+
+        self._timestep_tm1 = timestep_t
+        self._a_tm1 = a_t
+
+        if timestep_t.done:
+            # Yield any remaining n, n-1, ..., 1-step transitions at episode end.
+            while self._transitions:
+                yield _build_n_step_transition(self._transitions, self._discount)
+                self._transitions.popleft()
+        else:
+            # Wait for n transitions before yielding anything.
+            if len(self._transitions) < self._transitions.maxlen:
+                return  # Empty iterable.
+
+            assert len(self._transitions) == self._transitions.maxlen
+
+            # This is the typical case, yield a single n-step transition.
+            yield _build_n_step_transition(self._transitions, self._discount)
+
+    def reset(self) -> None:
+        """Resets the accumulator. Following timestep is expected to be FIRST."""
+        self._transitions.clear()
+        self._timestep_tm1 = None
+        self._a_tm1 = None
 
 class TransitionAccumulator:
     """Accumulates timesteps to form transitions."""
