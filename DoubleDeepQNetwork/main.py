@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from absl import logging
 
-from DeepQNetwork import agent as agent_lib
+from DoubleDeepQNetwork import agent as agent_lib
 from lib import replay_lib as replay_lib, util, environment as gym_env
 
 

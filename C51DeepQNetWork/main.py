@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from absl import logging
 
-from DeepQNetwork import agent as agent_lib
+from C51DeepQNetWork import agent
 from lib import replay_lib as replay_lib, util, environment as gym_env
 
 
@@ -52,8 +52,8 @@ class DqnNetworkOutputs(NamedTuple):
     q_values: torch.Tensor
 
 
-class DqnNet(nn.Module):
-    def __init__(self, state_dim: tuple, action_dim: int):
+class C51DqnNet(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, atoms: torch.Tensor):
         """
         Args:
             state_dim: the shape of the input tensor to the neural network
@@ -63,9 +63,13 @@ class DqnNet(nn.Module):
             raise ValueError(f'Expect action_dim to be a positive integer, got {action_dim}')
         if len(state_dim) != 3:
             raise ValueError(f'Expect state_dim to be a tuple with [C, H, W], got {state_dim}')
+        if len(atoms.shape) != 1:
+            raise ValueError(f'Expect atoms to be a 1D tensor, got {atoms.shape}')
 
         super().__init__()
         self.action_dim = action_dim
+        self.atoms = atoms
+        self.num_atoms = atoms.size(0)
 
         # network backbone
         self.body = ConvNet(state_dim)
@@ -73,11 +77,11 @@ class DqnNet(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(self.body.out_features, 512),
             nn.ReLU(),
-            nn.Linear(512, action_dim),
+            nn.Linear(512, action_dim * self.num_atoms),
         )
 
         # Initialize weights.
-        for module in self.modules():
+        for module in net.modules():
             if isinstance(module, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
                 if module.bias is not None:
@@ -123,6 +127,10 @@ def main(argv):
     num_train_steps = int(5e5)  # Number of training steps (environment steps or frames) to run per iteration
     importance_sampling_exponent_begin_value = 0.4  # Importance sampling exponent begin value
     importance_sampling_exponent_end_value = 1.0  # Importance sampling exponent end value after decay
+    learning_rate = 0.00025
+    num_atoms= 51 #Number of elements in the support of the categorical DQN
+    v_min= -10.0 #Minimum elements value in the support of the categorical DQN
+    v_max=10.0#Maximum elements value in the support of the categorical DQN
 
     random_state = np.random.RandomState(1)  # seed = 1
 
@@ -136,11 +144,12 @@ def main(argv):
 
     state_dim = train_env.observation_space.shape
     action_dim = train_env.action_space.n
+    atoms = torch.linspace(v_min, v_max, num_atoms).to(device=runtime_device, dtype=torch.float32)
 
     # Test environment and state shape.
     obs = train_env.reset()
-    print("Create DqnNetwork")
-    network = DqnNet(state_dim=state_dim, action_dim=action_dim)
+    print("Create C51-DQN Network")
+    network = C51DqnNet(state_dim=state_dim, action_dim=action_dim)
     optimizer = torch.optim.Adam(network.parameters(), lr=0.00025)
 
     # Create e-greedy exploration epsilon schedule
@@ -155,33 +164,18 @@ def main(argv):
     print("create replay buffer")
     # Create prioritized transition replay
     # Note the t in the replay is not exactly aligned with the agent t.
-    # importance_sampling_exponent_schedule = LinearSchedule(
-    #     begin_t=int(min_replay_size),
-    #     end_t=(num_iterations * int(num_train_steps)),
-    #     begin_value=importance_sampling_exponent_begin_value,
-    #     end_value=importance_sampling_exponent_end_value,
-    # )
-    # replay = replay_lib.PrioritizedReplay(
-    #     capacity=int(1e6),  # Maximum replay size.
-    #     structure=replay_lib.TransitionStructure,
-    #     priority_exponent=0.6,
-    #     importance_sampling_exponent=importance_sampling_exponent_schedule,
-    #     normalize_weights=True,
-    #     random_state=random_state,
-    #     encoder=lambda transition: transition._replace(
-    #         s_tm1=replay_lib.compress(transition.s_tm1),
-    #         s_t=replay_lib.compress(transition.s_t),
-    #     ),
-    #     decoder=lambda transition: transition._replace(
-    #         s_tm1=replay_lib.uncompress(transition.s_tm1),
-    #         s_t=replay_lib.uncompress(transition.s_t),
-    #     )
-    # )
-
-    # Create uniform transition replay
-    replay = replay_lib.UniformReplay(
+    importance_sampling_exponent_schedule = LinearSchedule(
+        begin_t=int(min_replay_size),
+        end_t=(num_iterations * int(num_train_steps)),
+        begin_value=importance_sampling_exponent_begin_value,
+        end_value=importance_sampling_exponent_end_value,
+    )
+    replay = replay_lib.PrioritizedReplay(
         capacity=int(1e6),  # Maximum replay size.
         structure=replay_lib.TransitionStructure,
+        priority_exponent=0.6,
+        importance_sampling_exponent=importance_sampling_exponent_schedule,
+        normalize_weights=True,
         random_state=random_state,
         encoder=lambda transition: transition._replace(
             s_tm1=replay_lib.compress(transition.s_tm1),
@@ -193,11 +187,12 @@ def main(argv):
         )
     )
 
-    # Create DQN agent instance
+    # Create C51-DQN agent instance
     print("create train agent")
-    train_agent = agent_lib.Dqn(
+    train_agent = agent.C51Dqn(
         network=network,
         optimizer=optimizer,
+        atoms=atoms,
         transition_accumulator=replay_lib.TransitionAccumulator(),
         replay=replay,
         exploration_epsilon=exploration_epsilon_schedule,
