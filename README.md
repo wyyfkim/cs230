@@ -1,4 +1,4 @@
-# cs230 Fianl Project
+# cs230 Final Project
 
 ## Get started
 
@@ -26,7 +26,7 @@ python3 PPO/train.py
 python3 PPO_LSTM/main.py
 ```
 
-### Running the Game with the Uploaded Model
+### Playing the Game with the Uploaded Model
 ```bash
 # ppo
 python3 PPO/play.py
