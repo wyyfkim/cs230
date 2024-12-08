@@ -9,42 +9,11 @@ from stable_baselines3.common.atari_wrappers import (
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from torch.distributions.categorical import Categorical
+from agent import Agent
 
 # Load the saved model
 model_path = "./models/step_5000000_ppo_agent.pt"  # Replace with your saved model path
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Define the same Agent class as in the training script
-class Agent(nn.Module):
-    def __init__(self, envs):
-        super().__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
-        )
-        self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1.0)  # Include the critic
-
-    def get_action(self, x):
-        with torch.no_grad():
-            hidden = self.network(x / 255.0)
-            logits = self.actor(hidden)
-            probs = Categorical(logits=logits)
-            action = probs.sample()
-        return action
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
 
 # Define the environment setup (must match the training environment)
 def make_env(env_id):
@@ -59,7 +28,6 @@ def make_env(env_id):
     env = gym.wrappers.GrayScaleObservation(env)
     env = gym.wrappers.FrameStack(env, 4)
     return env
-
 
 # Load the environment and agent
 env_id = "ALE/DemonAttack-v5"  # Replace with your environment ID
