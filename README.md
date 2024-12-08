@@ -39,4 +39,4 @@ python3 PPO/play.py
 ### Notes
 There is no significant performance difference between PPO and PPO_LSTM. As a result, only the PPO human play mode script has been included.
 
-![](docs/ppo%20vs%20ppo_lstm.png)
+<img src="docs/ppo%20vs%20ppo_lstm.png" width="400"/>
