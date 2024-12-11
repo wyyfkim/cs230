@@ -24,6 +24,18 @@ python3 PPO/train.py
 
 # ppo + lstm
 python3 PPO_LSTM/main.py
+
+# DQN
+python3 DeepQNetwork/main.py
+
+# double DQN
+python3 DoubleDeepQNetwork/main.py
+
+# C51 DQN
+python3 C51DeepQNetwork/main.py
+
+# Rainbow DQN
+python3 RainbowDeepQNetwork/main.py
 ```
 
 ### Playing the Game with the Uploaded Model
@@ -35,6 +47,7 @@ python3 PPO/play.py
 
 - PPO_LSTEM saved model is in [PPO_LSTM/models](https://github.com/wyyfkim/cs230/tree/main/PPO_LSTM/models)
 
+DQN saved model is in [checkpoints](https://github.com/wyyfkim/cs230/tree/main/checkpoints)
 
 ### Notes
 There is no significant performance difference between PPO and PPO_LSTM. As a result, only the PPO human play mode script has been included.
