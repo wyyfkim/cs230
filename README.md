@@ -1,5 +1,11 @@
 # cs230 Final Project
 
+## Game Recording 
+Player: Rainbow DQN 
+
+[![Watch the video](https://img.youtube.com/vi/kj108qNHR4Q/0.jpg)](https://youtu.be/kj108qNHR4Q)
+
+
 ## Get started
 
 
